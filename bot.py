@@ -14,7 +14,7 @@ import indicators
 import news
 
 COINGECKO = "https://api.coingecko.com/api/v3"
-BINANCE = "https://api.binance.com/api/v3"
+KRAKEN = "https://api.kraken.com/0/public"
 
 
 def cg_get(path, params=None, retries=3):
@@ -61,30 +61,41 @@ def fetch_usdt_dominance(total_mcap_usd):
         return None
 
 
-def fetch_klines(symbol, interval="1d", limit=None):
-    limit = limit or config.KLINES_LIMIT
-    r = requests.get(f"{BINANCE}/klines", params={
-        "symbol": symbol, "interval": interval, "limit": limit,
-    }, headers=config.HEADERS, timeout=15)
-    r.raise_for_status()
-    data = r.json()
-    highs = [float(x[2]) for x in data]
-    lows = [float(x[3]) for x in data]
-    closes = [float(x[4]) for x in data]
-    return highs, lows, closes
-
-
 def sma_status(closes):
     return indicators.sma_status(closes)
 
 
 def build_message():
-    # Prices from Binance (avoid CoinGecko rate limits)
-    def binance_24h(symbol):
-        r = requests.get(f"{BINANCE}/ticker/24hr", params={"symbol": symbol}, headers=config.HEADERS, timeout=15)
+    # Prices from Kraken (Binance is geo-blocked from GitHub runners)
+    def kraken_ticker(pair):
+        r = requests.get(f"{KRAKEN}/Ticker", params={"pair": pair}, headers=config.HEADERS, timeout=15)
         r.raise_for_status()
-        d = r.json()
-        return float(d["lastPrice"]), float(d["priceChangePercent"])
+        data = r.json()
+        if data.get("error"):
+            raise RuntimeError(str(data["error"]))
+        res = list(data["result"].values())[0]
+        last = float(res["c"][0])
+        openp = float(res["o"])
+        ch = (last - openp) / openp * 100.0 if openp else 0.0
+        return last, ch
+
+    def kraken_ohlc(pair, interval=1440):
+        r = requests.get(f"{KRAKEN}/OHLC", params={"pair": pair, "interval": interval}, headers=config.HEADERS, timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if data.get("error"):
+            raise RuntimeError(str(data["error"]))
+        candles = None
+        for v in data["result"].values():
+            if isinstance(v, list) and v and isinstance(v[0], list):
+                candles = v
+                break
+        if not candles:
+            raise RuntimeError("no OHLC data")
+        highs = [float(c[2]) for c in candles]
+        lows = [float(c[3]) for c in candles]
+        closes = [float(c[4]) for c in candles]
+        return highs, lows, closes
 
     g = fetch_global()
     time.sleep(2)
@@ -96,14 +107,14 @@ def build_message():
     now = datetime.now(timezone(timedelta(hours=3, minutes=30)))
     lines = [f"Crypto Digest - {now.strftime('%d %b %H:%M')} (UTC+3:30)", ""]
 
-    asset_map = [("BTC", "BTCUSDT"), ("ETH", "ETHUSDT")]
+    asset_map = [("BTC", "XBTUSD"), ("ETH", "ETHUSD")]
     statuses = {}
     atr_ratio_val = None
 
-    for sym, b_sym in asset_map:
-        p, ch = binance_24h(b_sym)
+    for sym, pair in asset_map:
+        p, ch = kraken_ticker(pair)
         arrow = "+" if ch >= 0 else ""
-        highs, lows, closes = fetch_klines(b_sym)
+        highs, lows, closes = kraken_ohlc(pair)
         r = indicators.rsi(closes)
         status = sma_status(closes)
         statuses[sym] = status
